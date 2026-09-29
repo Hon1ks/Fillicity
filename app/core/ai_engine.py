@@ -27,12 +27,17 @@ top-left origin, matching the exact image pixel dimensions stated in the prompt.
 Never invent data (no fake names, numbers, dates, addresses, etc.). If no matching \
 value exists for a visible field, skip that field entirely.
 - Keep values short and exactly as they should be typed into the field.
-- Respond with ONLY a JSON object, no prose, no markdown fences, matching this shape:
+- Do NOT think out loud, do NOT explain your reasoning, do NOT narrate which \
+field you're looking at. Output NOTHING except the JSON object below - no prose \
+before or after it, no markdown code fences. Your entire response must start \
+with "{" and end with "}".
 {"fields": [{"label": str, "value": str, "x": int, "y": int, "width": int, \
 "height": int, "confidence": float}], "notes": str}
 "notes" is a one-sentence, human-readable summary (in the same language as the \
 reference data) of what you filled or why nothing was filled.
 """
+
+MAX_OUTPUT_TOKENS = 8192
 
 
 class AIEngineError(Exception):
@@ -90,7 +95,7 @@ def analyze(
     try:
         response = client.chat.completions.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=MAX_OUTPUT_TOKENS,
             extra_headers={
                 "HTTP-Referer": "https://github.com/fillicity/fillicity",
                 "X-Title": "Fillicity",
@@ -105,8 +110,17 @@ def analyze(
 
     choice = response.choices[0] if response.choices else None
     raw_text = (choice.message.content or "") if choice else ""
+    finish_reason = getattr(choice, "finish_reason", "unknown") if choice else "no choices"
+
+    if finish_reason == "length":
+        raise AIEngineError(
+            f"Модель {model} исчерпала лимит токенов, не дойдя до ответа "
+            "(finish_reason=length) — обычно это модели, которые сначала долго "
+            "«размышляют» текстом и не укладываются в бюджет. Смените модель в "
+            "Настройках на менее «многословную», например anthropic/claude-sonnet-4.5, "
+            "openai/gpt-4o-mini или google/gemini-2.5-flash."
+        )
     if not raw_text.strip():
-        finish_reason = getattr(choice, "finish_reason", "unknown") if choice else "no choices"
         raise AIEngineError(
             f"Модель {model} вернула пустой ответ (finish_reason={finish_reason}). "
             "Попробуйте другую модель в Настройках — не все модели на OpenRouter "
