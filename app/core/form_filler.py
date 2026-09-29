@@ -9,7 +9,7 @@ from collections.abc import Callable
 from app.core.models import FieldFill
 
 ClickDelay = 0.25
-TypeInterval = 0.02
+ClipboardDelay = 0.08
 
 
 def fill_fields(
@@ -17,12 +17,14 @@ def fill_fields(
     on_progress: Callable[[int, int, FieldFill], None] | None = None,
     abort_check: Callable[[], bool] | None = None,
 ) -> int:
-    """Clicks each field and types its value. Returns how many fields were filled."""
+    """Clicks each field and pastes its value. Returns how many fields were filled."""
     import pyautogui
+    import pyperclip
 
     pyautogui.FAILSAFE = True
     filled = 0
     total = len(fields)
+    paste_key = "command" if _is_mac() else "ctrl"
 
     for index, field in enumerate(fields, start=1):
         if abort_check and abort_check():
@@ -42,7 +44,15 @@ def fill_fields(
         # exactly the active cell/selection in both spreadsheets and normal
         # text inputs, which is what we actually want here.
         pyautogui.press("delete")
-        pyautogui.typewrite(field.value, interval=TypeInterval)
+
+        # Paste via clipboard instead of pyautogui.typewrite(): typewrite drives
+        # raw keyboard-scancode events from a hardcoded US-layout table, so it
+        # silently drops any non-ASCII character (Cyrillic, accents, etc.) -
+        # digits/dates went through fine, real text did not. Clipboard paste
+        # works for any language regardless of keyboard layout.
+        pyperclip.copy(field.value)
+        time.sleep(ClipboardDelay)
+        pyautogui.hotkey(paste_key, "v")
         pyautogui.press("enter")
 
         filled += 1
@@ -50,3 +60,9 @@ def fill_fields(
             on_progress(index, total, field)
 
     return filled
+
+
+def _is_mac() -> bool:
+    import sys
+
+    return sys.platform == "darwin"
