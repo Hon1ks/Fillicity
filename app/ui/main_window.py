@@ -349,6 +349,8 @@ class MainWindow(QMainWindow):
         self.recognize_btn.setText("✨ Распознать и показать")
         self.plan = plan
         self._log(f"Найдено полей: {len(plan.fields)}. {plan.notes}")
+        for field in plan.fields:
+            self._log(f'  • {field.label or "(без подписи)"} → "{field.value}" @ ({field.x}, {field.y})')
         self.fields_summary.setText(
             f"Найдено полей: {len(plan.fields)}\n{plan.notes}" if plan.fields
             else f"Полей не найдено.\n{plan.notes}"
@@ -398,7 +400,10 @@ class MainWindow(QMainWindow):
         self._fill_worker.start()
 
     def _on_fill_progress(self, index: int, total: int, field) -> None:
-        self._log(f"Заполнено {index}/{total}: {field.label} = {field.value}")
+        self._log(
+            f'Заполнено {index}/{total}: {field.label} = "{field.value}" '
+            f"@ ({field.x}, {field.y})"
+        )
 
     def _on_fill_done(self, count: int) -> None:
         self.fill_btn.setText("✅ Заполнить форму")
