@@ -30,6 +30,7 @@ class FieldFill:
     width: int
     height: int
     confidence: float = 1.0
+    enabled: bool = True
 
     @property
     def center(self) -> tuple[int, int]:

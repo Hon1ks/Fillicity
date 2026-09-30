@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -10,6 +11,16 @@ from PySide6.QtWidgets import (
 )
 
 from app.core import config
+
+# Vision-capable models that reliably return strict JSON. Free-tier models are
+# omitted on purpose: they are rate-limited (429) or "think out loud" and never
+# reach the JSON. The box stays editable for any other OpenRouter model id.
+RECOMMENDED_MODELS = [
+    ("anthropic/claude-sonnet-4.5", "точнее всего размечает поля"),
+    ("openai/gpt-4o-mini", "дёшево и быстро"),
+    ("google/gemini-2.5-flash", "дёшево, хорошо читает мелкий текст"),
+    ("openai/gpt-4o", "надёжный универсал"),
+]
 
 
 class SettingsDialog(QDialog):
@@ -50,15 +61,22 @@ class SettingsDialog(QDialog):
         layout.addWidget(model_title)
 
         model_hint = QLabel(
-            "ID модели с поддержкой изображений, например anthropic/claude-sonnet-4.5, "
-            "openai/gpt-4o или google/gemini-2.5-flash. Список: openrouter.ai/models"
+            "Выберите из списка проверенных или впишите любой ID модели с поддержкой "
+            "изображений (openrouter.ai/models). Бесплатные (:free) часто отвечают "
+            "ошибкой 429 или не возвращают JSON."
         )
         model_hint.setObjectName("StatusLabel")
         model_hint.setWordWrap(True)
         layout.addWidget(model_hint)
 
-        self.model_input = QLineEdit(config.get_model())
-        self.model_input.setPlaceholderText(config.DEFAULT_MODEL)
+        self.model_input = QComboBox()
+        self.model_input.setEditable(True)
+        for model_id, note in RECOMMENDED_MODELS:
+            self.model_input.addItem(f"{model_id}  —  {note}", model_id)
+        self.model_input.setEditText(config.get_model())
+        self.model_input.activated.connect(
+            lambda i: self.model_input.setEditText(self.model_input.itemData(i))
+        )
         layout.addWidget(self.model_input)
 
         buttons = QHBoxLayout()
@@ -81,5 +99,5 @@ class SettingsDialog(QDialog):
 
     def _save(self) -> None:
         config.set_api_key(self.key_input.text())
-        config.set_model(self.model_input.text())
+        config.set_model(self.model_input.currentText().split()[0] if self.model_input.currentText().strip() else "")
         self.accept()

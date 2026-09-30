@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from app.core.models import CaptureRegion, FieldFill
 from app.ui import theme
+from app.ui.dpi import region_to_logical
 
 
 class OverlayCanvas(QWidget):
@@ -26,7 +27,8 @@ class OverlayCanvas(QWidget):
             | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setGeometry(region.x, region.y, region.width, region.height)
+        rect, self._dpr = region_to_logical(region)
+        self.setGeometry(rect)
         self._origin = (region.x, region.y)
         self.fields = fields
 
@@ -45,8 +47,14 @@ class OverlayCanvas(QWidget):
         painter.setFont(font)
         metrics = QFontMetrics(font)
 
+        d = self._dpr
         for field in self.fields:
-            local = QRect(field.x - ox, field.y - oy, field.width, field.height)
+            if not field.enabled:
+                continue
+            local = QRect(
+                round((field.x - ox) / d), round((field.y - oy) / d),
+                max(1, round(field.width / d)), max(1, round(field.height / d)),
+            )
 
             painter.setPen(box_pen)
             painter.setBrush(QColor(124, 92, 252, 40))
@@ -110,7 +118,8 @@ class FloatingToolbar(QWidget):
         outer.addWidget(bar)
 
         width = 260 if field_count else 220
-        self.setGeometry(region.x + region.width - width - 12, max(region.y - 56, 8), width, 48)
+        rect, _ = region_to_logical(region)
+        self.setGeometry(rect.right() - width - 12, max(rect.y() - 56, 8), width, 48)
 
     def set_field_count(self, count: int) -> None:
         self.label.setText(f"Найдено полей: {count}")

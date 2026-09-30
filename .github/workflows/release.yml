@@ -25,6 +25,11 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Run tests
+        run: |
+          pip install pytest
+          python -m pytest -q tests
+
       - name: Build with PyInstaller
         run: pyinstaller Fillicity.spec
 

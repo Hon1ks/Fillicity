@@ -130,6 +130,46 @@ QListWidget::item:selected {{
     color: white;
 }}
 
+QComboBox {{
+    background-color: {PANEL_ALT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 6px 8px;
+}}
+QComboBox:focus {{
+    border-color: {ACCENT};
+}}
+QComboBox QAbstractItemView {{
+    background-color: {PANEL_ALT};
+    selection-background-color: {ACCENT};
+}}
+
+QTableWidget {{
+    background-color: {PANEL_ALT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    gridline-color: {BORDER};
+    selection-background-color: #3A3354;
+}}
+QTableWidget::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid #6A6A7C;
+    border-radius: 3px;
+    background-color: {PANEL};
+}}
+QTableWidget::indicator:checked {{
+    background-color: {ACCENT};
+    border-color: {ACCENT};
+}}
+QHeaderView::section {{
+    background-color: {PANEL};
+    color: {TEXT_DIM};
+    border: none;
+    border-bottom: 1px solid {BORDER};
+    padding: 4px 6px;
+}}
+
 QTextEdit, QLineEdit {{
     background-color: {PANEL_ALT};
     border: 1px solid {BORDER};

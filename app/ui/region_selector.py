@@ -5,7 +5,7 @@ from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from app.core.models import CaptureRegion
+from app.ui.dpi import logical_rect_to_region
 
 
 class RegionSelector(QWidget):
@@ -87,11 +87,8 @@ class RegionSelector(QWidget):
             if selection.width() < 8 or selection.height() < 8:
                 self.update()
                 return
-            region = CaptureRegion(
-                x=self._origin_x + selection.x(),
-                y=self._origin_y + selection.y(),
-                width=selection.width(),
-                height=selection.height(),
+            region = logical_rect_to_region(
+                selection.translated(self._origin_x, self._origin_y)
             )
             self.close()
             self.region_selected.emit(region)

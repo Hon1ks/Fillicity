@@ -5,22 +5,27 @@ import datetime
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from app.core import config, data_loader, screen_capture
+from app.core.form_filler import fillable
 from app.core.data_loader import UnsupportedFileError
 from app.core.models import CaptureRegion, FillPlan, SourceDocument
 from app.ui import theme
@@ -51,7 +56,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Fillicity")
-        self.resize(980, 720)
+        self.resize(1040, 800)
         self.setStyleSheet(theme.STYLESHEET)
 
         self.region: CaptureRegion | None = None
@@ -66,6 +71,7 @@ class MainWindow(QMainWindow):
         self._toolbar: FloatingToolbar | None = None
         self._analyze_worker: AnalyzeWorker | None = None
         self._fill_worker: FillWorker | None = None
+        self._populating_table = False
 
         self._build_ui()
         self._refresh_states()
@@ -87,6 +93,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self._build_data_card(), 0, 1)
         grid.addWidget(self._build_recognize_card(), 1, 0)
         grid.addWidget(self._build_fill_card(), 1, 1)
+        grid.setRowStretch(1, 1)
         root.addLayout(grid, stretch=1)
 
         root.addWidget(self._build_log_panel())
@@ -196,7 +203,20 @@ class MainWindow(QMainWindow):
         self.fields_summary.setWordWrap(True)
         layout.addWidget(self.fields_summary)
 
-        layout.addStretch(1)
+        self.fields_table = QTableWidget(0, 3)
+        self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение", "x, y"])
+        header = self.fields_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.fields_table.verticalHeader().setVisible(False)
+        self.fields_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.fields_table.setMinimumHeight(140)
+        self.fields_table.setToolTip(
+            "Галочка — заполнять ли поле. Значение можно исправить двойным кликом."
+        )
+        self.fields_table.itemChanged.connect(self._on_field_edited)
+        layout.addWidget(self.fields_table, stretch=1)
 
         fill_btn = QPushButton("✅ Заполнить форму")
         fill_btn.setObjectName("Success")
@@ -223,7 +243,7 @@ class MainWindow(QMainWindow):
         has_region = self.region is not None
         self.recognize_btn.setEnabled(has_region)
         self.rescan_btn.setEnabled(has_region)
-        self.fill_btn.setEnabled(bool(self.plan and self.plan.fields))
+        self.fill_btn.setEnabled(bool(self.plan and fillable(self.plan.fields)))
 
     def _open_settings(self) -> None:
         SettingsDialog(self).exec()
@@ -352,9 +372,10 @@ class MainWindow(QMainWindow):
         for field in plan.fields:
             self._log(f'  • {field.label or "(без подписи)"} → "{field.value}" @ ({field.x}, {field.y})')
         self.fields_summary.setText(
-            f"Найдено полей: {len(plan.fields)}\n{plan.notes}" if plan.fields
-            else f"Полей не найдено.\n{plan.notes}"
+            f"Найдено полей: {len(plan.fields)}. {plan.notes}" if plan.fields
+            else f"Полей не найдено. {plan.notes}"
         )
+        self._populate_fields_table(plan)
         self._show_overlay(plan)
         self._refresh_states()
 
@@ -362,14 +383,66 @@ class MainWindow(QMainWindow):
         self.recognize_btn.setEnabled(True)
         self.recognize_btn.setText("✨ Распознать и показать")
         self._log(f"Ошибка анализа: {message}")
-        QMessageBox.warning(self, "Ошибка распознавания", message)
+        if "429" in message:
+            message = (
+                "Модель сейчас перегружена (ошибка 429 — лимит запросов, обычно у "
+                "бесплатных моделей). Повторите через минуту или выберите другую "
+                "модель в Настройках.\n\n" + message
+            )
+        box = QMessageBox(QMessageBox.Icon.Warning, "Ошибка распознавания", message, parent=self)
+        retry_btn = box.addButton("Повторить", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Закрыть", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is retry_btn:
+            self._run_recognition()
+
+    def _populate_fields_table(self, plan: FillPlan) -> None:
+        self._populating_table = True
+        self.fields_table.setRowCount(len(plan.fields))
+        for row, field in enumerate(plan.fields):
+            label_item = QTableWidgetItem(field.label or "(без подписи)")
+            label_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            label_item.setCheckState(
+                Qt.CheckState.Checked if field.value else Qt.CheckState.Unchecked
+            )
+            field.enabled = bool(field.value)
+            value_item = QTableWidgetItem(field.value)
+            coord_item = QTableWidgetItem(f"{field.x}, {field.y}")
+            coord_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            self.fields_table.setItem(row, 0, label_item)
+            self.fields_table.setItem(row, 1, value_item)
+            self.fields_table.setItem(row, 2, coord_item)
+        self._populating_table = False
+
+    def _on_field_edited(self, item: QTableWidgetItem) -> None:
+        if self._populating_table or not self.plan:
+            return
+        field = self.plan.fields[item.row()]
+        if item.column() == 0:
+            field.enabled = item.checkState() == Qt.CheckState.Checked
+        elif item.column() == 1:
+            field.value = item.text()
+            if field.value and not field.enabled:
+                self._populating_table = True
+                self.fields_table.item(item.row(), 0).setCheckState(Qt.CheckState.Checked)
+                self._populating_table = False
+                field.enabled = True
+        if self._overlay_canvas:
+            self._overlay_canvas.update()
+        if self._toolbar:
+            self._toolbar.set_field_count(len(fillable(self.plan.fields)))
+        self._refresh_states()
 
     def _show_overlay(self, plan: FillPlan) -> None:
         self._close_overlay()
         self._overlay_canvas = OverlayCanvas(plan.region, plan.fields)
         self._overlay_canvas.show()
 
-        self._toolbar = FloatingToolbar(plan.region, len(plan.fields))
+        self._toolbar = FloatingToolbar(plan.region, len(fillable(plan.fields)))
         self._toolbar.fill_clicked.connect(self._run_fill)
         self._toolbar.close_clicked.connect(self._close_overlay)
         self._toolbar.show()
@@ -385,13 +458,17 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- fill
 
     def _run_fill(self) -> None:
-        if not self.plan or not self.plan.fields:
+        if not self.plan or not fillable(self.plan.fields):
             QMessageBox.information(self, "Нечего заполнять", "Сначала распознайте форму.")
             return
 
         self.fill_btn.setEnabled(False)
         self.fill_btn.setText("⏳ Заполняю...")
-        self._log("Начинаю заполнение формы на экране...")
+        self._log("Начинаю заполнение формы на экране (снизу вверх, справа налево)...")
+
+        # Our own windows must not sit on top of the form while we click into
+        # it, or clicks land on Fillicity instead of the target field.
+        self._set_own_windows_visible(False)
 
         self._fill_worker = FillWorker(list(self.plan.fields))
         self._fill_worker.progress.connect(self._on_fill_progress)
@@ -406,13 +483,26 @@ class MainWindow(QMainWindow):
         )
 
     def _on_fill_done(self, count: int) -> None:
+        self._close_overlay()
+        self._set_own_windows_visible(True)
         self.fill_btn.setText("✅ Заполнить форму")
         self._refresh_states()
         self._log(f"Готово: заполнено полей — {count}")
-        self._close_overlay()
 
     def _on_fill_failed(self, message: str) -> None:
+        self._set_own_windows_visible(True)
         self.fill_btn.setText("✅ Заполнить форму")
         self._refresh_states()
         self._log(f"Ошибка заполнения: {message}")
         QMessageBox.warning(self, "Ошибка заполнения", message)
+
+    def _set_own_windows_visible(self, visible: bool) -> None:
+        for window in (self._overlay_canvas, self._toolbar):
+            if window:
+                window.setVisible(visible)
+        if visible:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        else:
+            self.showMinimized()

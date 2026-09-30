@@ -6,10 +6,13 @@ OpenRouter docs: https://openrouter.ai/docs
 """
 from __future__ import annotations
 
+import base64
+import io
 import json
 import re
 
 from app.core.config import DEFAULT_MODEL
+from app.core.coords import downscale_size
 from app.core.models import CaptureRegion, FieldFill, FillPlan, SourceDocument
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -39,6 +42,12 @@ reference data) of what you filled or why nothing was filled.
 
 MAX_OUTPUT_TOKENS = 8192
 
+# Vision models silently downscale large images (Claude to ~1568px on the long
+# side) and then answer in the coordinates of what they actually saw. Sending
+# an image already at that size, and telling the model its exact size, keeps
+# the returned coordinates in a space we can map back precisely.
+MAX_IMAGE_SIDE = 1568
+
 
 class AIEngineError(Exception):
     pass
@@ -60,17 +69,21 @@ def analyze(
 
     client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=api_key)
 
+    sent_b64, sent_w, sent_h, scale = _prepare_screenshot(
+        screenshot_b64, image_width, image_height
+    )
+
     content: list[dict] = [
         {
             "type": "text",
             "text": (
-                f"Screenshot pixel size: {image_width}x{image_height}.\n"
+                f"Screenshot pixel size: {sent_w}x{sent_h}.\n"
                 "Reference data the user wants filled into this form follows."
             ),
         },
         {
             "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+            "image_url": {"url": f"data:image/png;base64,{sent_b64}"},
         },
     ]
 
@@ -128,34 +141,75 @@ def analyze(
         )
     data = _parse_json(raw_text)
 
-    fields = []
-    for item in data.get("fields", []):
-        try:
-            fields.append(
-                FieldFill(
-                    label=str(item.get("label", "")),
-                    value=str(item.get("value", "")),
-                    x=region.x + int(item["x"]),
-                    y=region.y + int(item["y"]),
-                    width=max(1, int(item.get("width", 40))),
-                    height=max(1, int(item.get("height", 24))),
-                    confidence=float(item.get("confidence", 1.0)),
-                )
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-
+    fields = parse_fields(data, region, scale, image_width, image_height)
     return FillPlan(region=region, fields=fields, notes=str(data.get("notes", "")))
 
 
+def parse_fields(
+    data: dict, region: CaptureRegion, scale: float, image_width: int, image_height: int
+) -> list[FieldFill]:
+    """Maps model coordinates (in the sent image) to absolute physical pixels."""
+    fields: list[FieldFill] = []
+    for item in data.get("fields", []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            x = float(item["x"]) * scale
+            y = float(item["y"]) * scale
+            w = max(1.0, float(item.get("width", 40)) * scale)
+            h = max(1.0, float(item.get("height", 24)) * scale)
+            confidence = float(item.get("confidence", 1.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        # Drop boxes whose centre falls outside the screenshot - clicking them
+        # would hit whatever sits next to the captured region.
+        if not (0 <= x + w / 2 <= image_width and 0 <= y + h / 2 <= image_height):
+            continue
+        value = item.get("value", "")
+        fields.append(
+            FieldFill(
+                label=str(item.get("label", "") or ""),
+                value="" if value is None else str(value),
+                x=region.x + round(x),
+                y=region.y + round(y),
+                width=round(w),
+                height=round(h),
+                confidence=confidence,
+            )
+        )
+    return fields
+
+
+def _prepare_screenshot(
+    screenshot_b64: str, width: int, height: int
+) -> tuple[str, int, int, float]:
+    new_w, new_h, scale = downscale_size(width, height, MAX_IMAGE_SIDE)
+    if scale == 1.0:
+        return screenshot_b64, width, height, 1.0
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(base64.standard_b64decode(screenshot_b64)))
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.standard_b64encode(buf.getvalue()).decode("ascii"), new_w, new_h, scale
+
+
 def _parse_json(raw_text: str) -> dict:
-    raw_text = raw_text.strip()
-    raw_text = re.sub(r"^```(?:json)?", "", raw_text).strip()
-    raw_text = re.sub(r"```$", "", raw_text).strip()
-    match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-    if not match:
-        raise AIEngineError(f"AI вернул неожиданный ответ:\n{raw_text[:500]}")
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise AIEngineError(f"Не удалось разобрать JSON от AI: {exc}") from exc
+    """Finds the answer object even when a model wraps it in prose or fences."""
+    text = raw_text.strip()
+    decoder = json.JSONDecoder()
+    fallback: dict | None = None
+    for match in re.finditer(r"\{", text):
+        try:
+            obj, _ = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            if "fields" in obj:
+                return obj
+            fallback = fallback or obj
+    if fallback is not None:
+        return fallback
+    raise AIEngineError(f"AI вернул неожиданный ответ:\n{text[:500]}")
