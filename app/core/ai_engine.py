@@ -13,6 +13,7 @@ import re
 
 from app.core.config import DEFAULT_MODEL
 from app.core.coords import downscale_size
+from app.core.grid import cell_rect, detect_grid, normalize_cell
 from app.core.models import CaptureRegion, FieldFill, FillPlan, SourceDocument
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -30,17 +31,22 @@ top-left origin, matching the exact image pixel dimensions stated in the prompt.
 Never invent data (no fake names, numbers, dates, addresses, etc.). If no matching \
 value exists for a visible field, skip that field entirely.
 - Keep values short and exactly as they should be typed into the field.
+- If the screenshot is a spreadsheet (Excel, LibreOffice Calc) with column letters \
+and row numbers in its headers, ALSO give each field its cell address in "cell" \
+(e.g. "B3"), read from those headers - this matters more than the pixel box. \
+Use Latin letters. Also set top-level "top_left_cell" to the address of the first \
+visible cell at the top-left of the grid (usually "A1").
 - Do NOT think out loud, do NOT explain your reasoning, do NOT narrate which \
 field you're looking at. Output NOTHING except the JSON object below - no prose \
 before or after it, no markdown code fences. Your entire response must start \
 with "{" and end with "}".
 {"fields": [{"label": str, "value": str, "x": int, "y": int, "width": int, \
-"height": int, "confidence": float}], "notes": str}
+"height": int, "confidence": float, "cell": str}], "top_left_cell": str, "notes": str}
 "notes" is a one-sentence, human-readable summary (in the same language as the \
 reference data) of what you filled or why nothing was filled.
 """
 
-MAX_OUTPUT_TOKENS = 8192
+MAX_OUTPUT_TOKENS = 16384
 
 # Vision models silently downscale large images (Claude to ~1568px on the long
 # side) and then answer in the coordinates of what they actually saw. Sending
@@ -113,6 +119,9 @@ def analyze(
                 "HTTP-Referer": "https://github.com/fillicity/fillicity",
                 "X-Title": "Fillicity",
             },
+            # Reasoning models (deepseek, qwen3, ...) otherwise spend the whole
+            # budget thinking and never reach the JSON. Ignored by other models.
+            extra_body={"reasoning": {"effort": "low"}},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": content},
@@ -142,7 +151,28 @@ def analyze(
     data = _parse_json(raw_text)
 
     fields = parse_fields(data, region, scale, image_width, image_height)
+    snap_to_grid(fields, data, region, screenshot_b64)
     return FillPlan(region=region, fields=fields, notes=str(data.get("notes", "")))
+
+
+def snap_to_grid(
+    fields: list[FieldFill], data: dict, region: CaptureRegion, screenshot_b64: str
+) -> None:
+    """For spreadsheet fields, replace the model's guessed pixel box with the
+    exact cell rectangle found from the sheet's gridlines."""
+    if not any(f.cell for f in fields):
+        return
+    grid = detect_grid(base64.standard_b64decode(screenshot_b64))
+    if grid is None:
+        return
+    top_left = normalize_cell(data.get("top_left_cell")) or "A1"
+    for field in fields:
+        if not field.cell:
+            continue
+        rect = cell_rect(grid, field.cell, top_left)
+        if rect:
+            x, y, w, h = rect
+            field.x, field.y, field.width, field.height = region.x + x, region.y + y, w, h
 
 
 def parse_fields(
@@ -153,17 +183,26 @@ def parse_fields(
     for item in data.get("fields", []) or []:
         if not isinstance(item, dict):
             continue
+        cell = normalize_cell(item.get("cell")) or ""
         try:
             x = float(item["x"]) * scale
             y = float(item["y"]) * scale
             w = max(1.0, float(item.get("width", 40)) * scale)
             h = max(1.0, float(item.get("height", 24)) * scale)
-            confidence = float(item.get("confidence", 1.0))
         except (KeyError, TypeError, ValueError):
-            continue
+            if not cell:
+                continue
+            x = y = 0.0
+            w = h = 1.0
+        try:
+            confidence = float(item.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            confidence = 1.0
         # Drop boxes whose centre falls outside the screenshot - clicking them
-        # would hit whatever sits next to the captured region.
-        if not (0 <= x + w / 2 <= image_width and 0 <= y + h / 2 <= image_height):
+        # would hit whatever sits next to the captured region. A cell address
+        # is still usable even when the model's pixel guess is off.
+        inside = 0 <= x + w / 2 <= image_width and 0 <= y + h / 2 <= image_height
+        if not inside and not cell:
             continue
         value = item.get("value", "")
         fields.append(
@@ -175,6 +214,7 @@ def parse_fields(
                 width=round(w),
                 height=round(h),
                 confidence=confidence,
+                cell=cell,
             )
         )
     return fields

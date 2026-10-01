@@ -98,10 +98,114 @@ def test_analyze_requires_key():
 def test_clear_keys_never_select_all():
     from app.core.form_filler import clear_keys, target_kind_for_class
 
-    assert target_kind_for_class("XLMAIN") == "grid"
+    assert target_kind_for_class("XLMAIN") == "excel"
+    assert target_kind_for_class("SALFRAME") == "grid"
     assert target_kind_for_class("Chrome_WidgetWin_1") == "browser"
     assert target_kind_for_class("OpusApp") == "other"  # Word
-    for kind in ("grid", "browser", "other"):
+    for kind in ("excel", "grid", "browser", "other"):
         assert ("ctrl", "a") not in clear_keys(kind)
     assert clear_keys("grid") == [("delete",)]
+    assert clear_keys("excel") == [("delete",)]
     assert clear_keys("other") == []
+
+
+# ---------------------------------------------------------------- grid
+
+GRIDLINE, HEADER, HEADER_SEP = (218, 220, 221), (223, 227, 232), (177, 181, 186)
+COL_EDGES = [30, 220, 315, 435, 499, 563, 627, 691, 755, 819]
+ROW_TOP, ROW_H, N_ROWS = 110, 20, 30
+
+
+def excel_like_png(hide_row_line: int | None = None) -> bytes:
+    from PIL import ImageDraw
+
+    w, h = 900, ROW_TOP + ROW_H * N_ROWS + 30
+    img = Image.new("RGB", (w, h), "white")
+    d = ImageDraw.Draw(img)
+    # ribbon + formula bar: a white box with a gray frame, above the headers
+    d.rectangle([0, 0, w, 85], fill=(230, 233, 238))
+    d.rectangle([60, 60, w - 20, 80], fill="white", outline=(180, 180, 180))
+    # column header band and row header band
+    d.rectangle([0, 90, w, ROW_TOP - 1], fill=HEADER)
+    d.rectangle([0, 90, COL_EDGES[0] - 1, h], fill=HEADER)
+    d.line([0, ROW_TOP - 1, w, ROW_TOP - 1], fill=HEADER_SEP)
+    d.line([COL_EDGES[0] - 1, 90, COL_EDGES[0] - 1, h], fill=HEADER_SEP)
+    for x in COL_EDGES[1:]:
+        d.line([x, ROW_TOP, x, h], fill=GRIDLINE)
+        d.line([x, 90, x, ROW_TOP - 1], fill=HEADER_SEP)
+    for r in range(1, N_ROWS + 1):
+        y = ROW_TOP + r * ROW_H
+        d.line([COL_EDGES[0], y, w, y], fill=GRIDLINE)
+    # a bordered table (black) and a green-filled row, like the user's sheet
+    d.rectangle([COL_EDGES[0], ROW_TOP, COL_EDGES[3], ROW_TOP + 10 * ROW_H], outline="black")
+    for x in COL_EDGES[1:3]:
+        d.line([x, ROW_TOP, x, ROW_TOP + 10 * ROW_H], fill="black")
+    d.rectangle([COL_EDGES[0] + 1, ROW_TOP + 8 * ROW_H + 1, COL_EDGES[3] - 1,
+                 ROW_TOP + 9 * ROW_H - 1], fill=(216, 228, 188))
+    if hide_row_line is not None:  # something covering a row boundary
+        y = ROW_TOP + hide_row_line * ROW_H
+        d.rectangle([COL_EDGES[0] + 1, y - 3, w, y + 3], fill=(120, 100, 200))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("hidden", [None, 3])
+def test_detect_grid_finds_exact_cells(hidden):
+    from app.core.grid import cell_rect, detect_grid
+
+    grid = detect_grid(excel_like_png(hide_row_line=hidden))
+    assert grid is not None
+    assert grid.col_edges[:len(COL_EDGES)] == [COL_EDGES[0] - 1] + COL_EDGES[1:]
+    assert grid.row_edges[0] == ROW_TOP - 1
+    assert grid.row_edges[1:6] == [ROW_TOP + ROW_H * i for i in range(1, 6)]
+    x, y, w, h = cell_rect(grid, "B3")
+    assert (x, y) == (COL_EDGES[1] + 1, ROW_TOP + 2 * ROW_H + 1)
+    assert (w, h) == (COL_EDGES[2] - COL_EDGES[1] - 1, ROW_H - 1)
+    # scrolled sheet: first visible cell is C5, so C5 is the top-left cell
+    assert cell_rect(grid, "C5", top_left="C5")[:2] == (COL_EDGES[0], ROW_TOP)
+    assert cell_rect(grid, "A1", top_left="C5") is None
+
+
+def test_detect_grid_rejects_non_spreadsheet():
+    from app.core.grid import detect_grid
+
+    img = Image.new("RGB", (400, 300), (40, 40, 50))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    assert detect_grid(buf.getvalue()) is None
+
+
+def test_normalize_cell_handles_cyrillic_lookalikes():
+    from app.core.grid import normalize_cell, split_cell
+
+    assert normalize_cell("В3") == "B3"  # Cyrillic В
+    assert normalize_cell(" c10 ") == "C10"
+    assert split_cell(normalize_cell("$A$1")) == (1, 1)
+    assert normalize_cell("Дата") is None
+    assert normalize_cell(None) is None
+    assert split_cell("AA12") == (27, 12)
+
+
+def test_analyze_snaps_cell_fields_to_grid():
+    from app.core.ai_engine import parse_fields, snap_to_grid
+
+    png = excel_like_png()
+    b64 = base64.standard_b64encode(png).decode()
+    region = CaptureRegion(x=100, y=50, width=900, height=ROW_TOP + ROW_H * N_ROWS + 30)
+    data = {"top_left_cell": "A1", "fields": [
+        # model's pixel guess is far off, but the address is right
+        {"label": "Дата", "value": "20.08.2025", "cell": "В3", "x": 600, "y": 500,
+         "width": 50, "height": 10},
+        {"label": "no coords", "value": "x", "cell": "C4"},
+        {"label": "plain", "value": "y", "x": 10, "y": 10, "width": 5, "height": 5},
+    ]}
+    fields = parse_fields(data, region, 1.0, region.width, region.height)
+    snap_to_grid(fields, data, region, b64)
+    by_label = {f.label: f for f in fields}
+    b3 = by_label["Дата"]
+    assert b3.cell == "B3"
+    assert (b3.x, b3.y) == (100 + COL_EDGES[1] + 1, 50 + ROW_TOP + 2 * ROW_H + 1)
+    c4 = by_label["no coords"]
+    assert (c4.x, c4.y) == (100 + COL_EDGES[2] + 1, 50 + ROW_TOP + 3 * ROW_H + 1)
+    assert (by_label["plain"].x, by_label["plain"].y) == (110, 60)

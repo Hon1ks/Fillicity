@@ -38,9 +38,10 @@ class FillWorker(QThread):
     finished_ok = Signal(int)
     failed = Signal(str)
 
-    def __init__(self, fields: list[FieldFill]) -> None:
+    def __init__(self, fields: list[FieldFill], probe: tuple[int, int] | None = None) -> None:
         super().__init__()
         self.fields = fields
+        self.probe = probe
         self._abort = False
 
     def abort(self) -> None:
@@ -52,6 +53,7 @@ class FillWorker(QThread):
                 self.fields,
                 on_progress=lambda i, t, f: self.progress.emit(i, t, f),
                 abort_check=lambda: self._abort,
+                probe=self.probe,
             )
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))

@@ -31,6 +31,7 @@ class FieldFill:
     height: int
     confidence: float = 1.0
     enabled: bool = True
+    cell: str = ""  # spreadsheet address like "B3", when the target is a sheet
 
     @property
     def center(self) -> tuple[int, int]:

@@ -203,12 +203,14 @@ class MainWindow(QMainWindow):
         self.fields_summary.setWordWrap(True)
         layout.addWidget(self.fields_summary)
 
-        self.fields_table = QTableWidget(0, 3)
-        self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение", "x, y"])
+        self.fields_table = QTableWidget(0, 4)
+        self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение", "Ячейка", "x, y"])
         header = self.fields_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(0, 190)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.fields_table.verticalHeader().setVisible(False)
         self.fields_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.fields_table.setMinimumHeight(140)
@@ -218,11 +220,19 @@ class MainWindow(QMainWindow):
         self.fields_table.itemChanged.connect(self._on_field_edited)
         layout.addWidget(self.fields_table, stretch=1)
 
+        buttons = QHBoxLayout()
+        clear_btn = QPushButton("🧹 Очистить")
+        clear_btn.setObjectName("Ghost")
+        clear_btn.setToolTip("Убрать результаты распознавания, подсказки на экране и журнал")
+        clear_btn.clicked.connect(self._clear_results)
+        self.clear_btn = clear_btn
         fill_btn = QPushButton("✅ Заполнить форму")
         fill_btn.setObjectName("Success")
         fill_btn.clicked.connect(self._run_fill)
         self.fill_btn = fill_btn
-        layout.addWidget(fill_btn)
+        buttons.addWidget(clear_btn)
+        buttons.addWidget(fill_btn, stretch=1)
+        layout.addLayout(buttons)
         return frame
 
     def _build_log_panel(self) -> QFrame:
@@ -256,6 +266,7 @@ class MainWindow(QMainWindow):
     HIDE_CAPTURE_DELAY_MS = 200
 
     def _start_region_selection(self) -> None:
+        self._close_overlay()
         self.hide()
         self._region_selector = RegionSelector()
         self._region_selector.region_selected.connect(self._on_region_selected)
@@ -267,6 +278,7 @@ class MainWindow(QMainWindow):
         self._log("Выбор области отменена")
 
     def _capture_full_screen(self) -> None:
+        self._close_overlay()
         self.hide()
         QTimer.singleShot(self.HIDE_CAPTURE_DELAY_MS, self._do_full_screen_capture)
 
@@ -287,6 +299,8 @@ class MainWindow(QMainWindow):
 
     def _rescan_region(self) -> None:
         if self.region:
+            # The previous overlay must not end up in the new screenshot.
+            self._close_overlay()
             self.hide()
             QTimer.singleShot(self.HIDE_CAPTURE_DELAY_MS, self._finish_capture)
 
@@ -344,6 +358,12 @@ class MainWindow(QMainWindow):
         if not self.region or not self.screenshot_b64:
             QMessageBox.information(self, "Нет области", "Сначала выберите область экрана.")
             return
+        if not self.sources:
+            QMessageBox.information(
+                self, "Нет данных",
+                "Сначала добавьте файл или изображение с данными для заполнения (шаг 2).",
+            )
+            return
         api_key = config.get_api_key()
         if not api_key:
             QMessageBox.information(
@@ -370,7 +390,8 @@ class MainWindow(QMainWindow):
         self.plan = plan
         self._log(f"Найдено полей: {len(plan.fields)}. {plan.notes}")
         for field in plan.fields:
-            self._log(f'  • {field.label or "(без подписи)"} → "{field.value}" @ ({field.x}, {field.y})')
+            where = f"{field.cell} " if field.cell else ""
+            self._log(f'  • {field.label or "(без подписи)"} → "{field.value}" @ {where}({field.x}, {field.y})')
         self.fields_summary.setText(
             f"Найдено полей: {len(plan.fields)}. {plan.notes}" if plan.fields
             else f"Полей не найдено. {plan.notes}"
@@ -411,11 +432,15 @@ class MainWindow(QMainWindow):
             )
             field.enabled = bool(field.value)
             value_item = QTableWidgetItem(field.value)
+            read_only = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+            cell_item = QTableWidgetItem(field.cell or "—")
+            cell_item.setFlags(read_only)
             coord_item = QTableWidgetItem(f"{field.x}, {field.y}")
-            coord_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            coord_item.setFlags(read_only)
             self.fields_table.setItem(row, 0, label_item)
             self.fields_table.setItem(row, 1, value_item)
-            self.fields_table.setItem(row, 2, coord_item)
+            self.fields_table.setItem(row, 2, cell_item)
+            self.fields_table.setItem(row, 3, coord_item)
         self._populating_table = False
 
     def _on_field_edited(self, item: QTableWidgetItem) -> None:
@@ -470,16 +495,19 @@ class MainWindow(QMainWindow):
         # it, or clicks land on Fillicity instead of the target field.
         self._set_own_windows_visible(False)
 
-        self._fill_worker = FillWorker(list(self.plan.fields))
+        region = self.plan.region
+        probe = (region.x + region.width // 2, region.y + region.height // 2)
+        self._fill_worker = FillWorker(list(self.plan.fields), probe)
         self._fill_worker.progress.connect(self._on_fill_progress)
         self._fill_worker.finished_ok.connect(self._on_fill_done)
         self._fill_worker.failed.connect(self._on_fill_failed)
         self._fill_worker.start()
 
     def _on_fill_progress(self, index: int, total: int, field) -> None:
+        where = f"{field.cell} " if field.cell else ""
         self._log(
             f'Заполнено {index}/{total}: {field.label} = "{field.value}" '
-            f"@ ({field.x}, {field.y})"
+            f"@ {where}({field.x}, {field.y})"
         )
 
     def _on_fill_done(self, count: int) -> None:
@@ -506,3 +534,13 @@ class MainWindow(QMainWindow):
             self.activateWindow()
         else:
             self.showMinimized()
+
+    def _clear_results(self) -> None:
+        self._close_overlay()
+        self.plan = None
+        self._populating_table = True
+        self.fields_table.setRowCount(0)
+        self._populating_table = False
+        self.fields_summary.setText("Сначала распознайте форму")
+        self.log_view.clear()
+        self._refresh_states()
