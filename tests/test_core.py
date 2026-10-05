@@ -103,7 +103,9 @@ def test_clear_keys_never_select_all():
     assert target_kind_for_class("OpusApp") == "other"  # Word
     for kind in ("grid", "browser", "other"):
         assert ("ctrl", "a") not in clear_keys(kind)
-    assert clear_keys("grid") == [("delete",)]
+    assert clear_keys("grid") == []  # paste into a selected cell replaces it
+    for kind in ("grid", "browser", "other"):
+        assert ("delete",) not in clear_keys(kind)  # a failed paste must not erase
     assert clear_keys("other") == []
 
 
@@ -280,3 +282,23 @@ def test_unanchored_fields_are_flagged():
     fields = parse_fields(data, region, 1.0, 640, 320, len(FORM_BOXES))
     place_fields(fields, data, region, None, FORM_BOXES)
     assert [f.anchored for f in fields] == [True, False]
+
+
+
+def test_paste_uses_layout_independent_key_codes(monkeypatch):
+    """Under a Russian layout pyautogui can't map "v" and sends nothing; the
+    paste must go out as the V virtual-key code instead."""
+    import types
+
+    from app.core import form_filler
+
+    events = []
+    user32 = types.SimpleNamespace(
+        MapVirtualKeyW=lambda vk, kind: vk + 1000,
+        keybd_event=lambda vk, scan, flags, extra: events.append((vk, flags)),
+    )
+    fake_ctypes = types.SimpleNamespace(windll=types.SimpleNamespace(user32=user32))
+    monkeypatch.setattr(form_filler.sys, "platform", "win32")
+    monkeypatch.setitem(__import__("sys").modules, "ctypes", fake_ctypes)
+    form_filler.press_paste()
+    assert events == [(0x11, 0), (0x56, 0), (0x56, 2), (0x11, 2)]

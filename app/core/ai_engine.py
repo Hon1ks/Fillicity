@@ -25,7 +25,13 @@ of a form or document, and proposes what value belongs in each field based on th
 reference data the user supplied.
 
 Rules:
-- Only report fields that are actually empty and fillable, or that need correction.
+- Only report fields that are currently EMPTY. Never change a field or cell that \
+already contains anything - in particular never touch column headers, row \
+labels or section titles, even if the reference data words them differently.
+- Match each empty field to the reference item it belongs to by reading the \
+labels around it (its row label, column header, the field caption). In a \
+table, the first row is usually the header row: data goes in the rows below it. \
+Go through every row so no empty field that has data is missed.
 - Coordinates MUST be pixel coordinates within the screenshot you were given, \
 top-left origin, matching the exact image pixel dimensions stated in the prompt.
 - Only propose a value when the reference data actually contains the information. \

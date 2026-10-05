@@ -38,17 +38,17 @@ def target_kind_for_class(window_class: str) -> str:
 
 
 def clear_keys(kind: str) -> list[tuple[str, ...]]:
-    """Keystrokes that empty the clicked field before pasting.
+    """Keystrokes that select the clicked field's existing text so the paste
+    replaces it.
 
     Never ctrl+a: in Excel it selects the whole sheet (pasting then fills every
-    cell) and in Word the whole document.
-    - grid: Delete clears exactly the selected cell.
-    - browser: End, Shift+Home selects the input's text, which the paste replaces.
+    cell) and in Word the whole document. Never Delete: if the paste then
+    fails, the original value is gone.
+    - grid: nothing - pasting into a selected cell already replaces it.
+    - browser: End, Shift+Home selects the input's text.
     - other: leave existing text alone - selecting "the line" in e.g. Word would
       also grab the field's printed label.
     """
-    if kind == "grid":
-        return [("delete",)]
     if kind == "browser":
         return [("end",), ("shift", "home")]
     return []
@@ -72,6 +72,31 @@ def _window_at(x: int, y: int) -> tuple[int, str]:
     buf = ctypes.create_unicode_buffer(256)
     user32.GetClassNameW(root, buf, 256)
     return int(root), buf.value
+
+
+def press_paste() -> None:
+    """Ctrl+V that works under any keyboard layout.
+
+    pyautogui maps letters to virtual keys through the *current* layout
+    (VkKeyScan). Under a Russian layout there is no Latin "v", so
+    pyautogui.hotkey("ctrl", "v") silently sends nothing - while Tab/Delete,
+    which have fixed key codes, still work. Send the V key's virtual-key code
+    (0x56) directly instead; Ctrl+that key is paste whatever the layout.
+    """
+    if sys.platform == "win32":
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        vk_control, vk_v, keyup = 0x11, 0x56, 0x0002
+        sc_control, sc_v = user32.MapVirtualKeyW(vk_control, 0), user32.MapVirtualKeyW(vk_v, 0)
+        user32.keybd_event(vk_control, sc_control, 0, 0)
+        user32.keybd_event(vk_v, sc_v, 0, 0)
+        user32.keybd_event(vk_v, sc_v, keyup, 0)
+        user32.keybd_event(vk_control, sc_control, keyup, 0)
+        return
+    import pyautogui
+
+    pyautogui.hotkey("command" if sys.platform == "darwin" else "ctrl", "v")
 
 
 def _bring_to_front(hwnd: int) -> bool:
@@ -102,12 +127,10 @@ def fill_fields(
     total = len(ordered)
     if not total:
         return 0
-    paste_key = "command" if sys.platform == "darwin" else "ctrl"
-
     def paste(text: str) -> None:
         pyperclip.copy(text)
         time.sleep(ClipboardDelay)
-        pyautogui.hotkey(paste_key, "v")
+        press_paste()
 
     # Let our own windows finish hiding, then bring the target app to the front.
     time.sleep(StartDelay)
