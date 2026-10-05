@@ -13,15 +13,15 @@ from app.core.models import FieldFill
 StartDelay = 0.4
 ClickDelay = 0.25
 ClipboardDelay = 0.08
-GoToDelay = 0.35
 # Longer than Windows' default double-click time (500 ms), so the activation
 # click and the first real click on the same spot never merge into a
 # double-click (which would put an Excel cell into in-cell edit mode).
 ActivationDelay = 0.6
 
-# Top-level window classes of the target app on Windows.
-EXCEL_WINDOW_CLASSES = {"XLMAIN"}
-GRID_WINDOW_CLASSES = {"SALFRAME"}  # LibreOffice
+# Top-level window classes of the target app on Windows. Only used to pick
+# how an already-filled field is cleared; filling itself is the same click +
+# paste everywhere.
+GRID_WINDOW_CLASSES = {"XLMAIN", "SALFRAME"}  # Excel, LibreOffice
 BROWSER_WINDOW_CLASSES = {"Chrome_WidgetWin_1", "MozillaWindowClass"}  # Chrome/Edge/Opera, Firefox
 
 
@@ -30,8 +30,6 @@ def fillable(fields: list[FieldFill]) -> list[FieldFill]:
 
 
 def target_kind_for_class(window_class: str) -> str:
-    if window_class in EXCEL_WINDOW_CLASSES:
-        return "excel"
     if window_class in GRID_WINDOW_CLASSES:
         return "grid"
     if window_class in BROWSER_WINDOW_CLASSES:
@@ -44,12 +42,12 @@ def clear_keys(kind: str) -> list[tuple[str, ...]]:
 
     Never ctrl+a: in Excel it selects the whole sheet (pasting then fills every
     cell) and in Word the whole document.
-    - excel/grid: Delete clears exactly the selected cell.
+    - grid: Delete clears exactly the selected cell.
     - browser: End, Shift+Home selects the input's text, which the paste replaces.
     - other: leave existing text alone - selecting "the line" in e.g. Word would
       also grab the field's printed label.
     """
-    if kind in ("excel", "grid"):
+    if kind == "grid":
         return [("delete",)]
     if kind == "browser":
         return [("end",), ("shift", "home")]
@@ -118,13 +116,9 @@ def fill_fields(
     if kind is None:
         kind = target_kind_for_class(window_class)
     if not _bring_to_front(hwnd):
-        # The first click on an inactive window may only activate it. Must
-        # happen before any F5: sent to a browser instead, F5 reloads the page.
-        pyautogui.click(*(probe or ordered[0].center))
+        # The first click on an inactive window may only activate it.
+        pyautogui.click(*ordered[0].center)
         time.sleep(ActivationDelay)
-    if kind == "excel":
-        time.sleep(0.2)
-        pyautogui.press("esc")  # leave in-cell edit mode / close open menus
     clearing = clear_keys(kind)
 
     filled = 0
@@ -132,20 +126,10 @@ def fill_fields(
         if abort_check and abort_check():
             break
 
-        if kind == "excel" and field.cell:
-            # Exact navigation by address via Go To (F5), independent of where
-            # the model thought the cell was on screen. The address is pasted,
-            # not typed, so a Cyrillic keyboard layout can't garble it.
-            pyautogui.press("f5")
-            time.sleep(GoToDelay)
-            paste(field.cell)
-            pyautogui.press("enter")
-            time.sleep(ClickDelay)
-        else:
-            cx, cy = field.center
-            pyautogui.moveTo(cx, cy, duration=0.15)
-            pyautogui.click(cx, cy)
-            time.sleep(ClickDelay)
+        cx, cy = field.center
+        pyautogui.moveTo(cx, cy, duration=0.15)
+        pyautogui.click(cx, cy)
+        time.sleep(ClickDelay)
 
         for keys in clearing:
             pyautogui.hotkey(*keys)
@@ -155,10 +139,9 @@ def fill_fields(
         # silently drops any non-ASCII character (Cyrillic, accents, etc.).
         paste(field.value)
 
-        if kind != "excel":
-            # Tab rather than Enter: both commit a cell, but Enter in a web
-            # form text input submits the whole form after the first field.
-            pyautogui.press("tab")
+        # Tab rather than Enter: both commit a cell, but Enter in a web form
+        # text input submits the whole form after the first field.
+        pyautogui.press("tab")
 
         filled += 1
         if on_progress:

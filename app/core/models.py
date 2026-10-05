@@ -32,6 +32,8 @@ class FieldFill:
     confidence: float = 1.0
     enabled: bool = True
     cell: str = ""  # spreadsheet address like "B3", when the target is a sheet
+    box: int = 0  # number of the detected input box the model chose (1-based)
+    anchored: bool = False  # position measured on the screenshot, not just guessed
 
     @property
     def center(self) -> tuple[int, int]:
@@ -58,3 +60,4 @@ class FillPlan:
     region: CaptureRegion
     fields: list[FieldFill] = field(default_factory=list)
     notes: str = ""
+    measured: bool = False  # input boxes or a grid were found on the screenshot

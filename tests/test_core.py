@@ -54,8 +54,7 @@ def test_prepare_screenshot_downscales_large_images():
     img = Image.new("RGB", (3000, 1500), "white")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    b64 = base64.standard_b64encode(buf.getvalue()).decode()
-    sent_b64, w, h, scale = _prepare_screenshot(b64, 3000, 1500)
+    sent_b64, w, h, scale = _prepare_screenshot(buf.getvalue(), 3000, 1500)
     assert (w, h) == (1568, 784)
     assert Image.open(io.BytesIO(base64.standard_b64decode(sent_b64))).size == (1568, 784)
     assert scale == pytest.approx(3000 / 1568)
@@ -98,14 +97,13 @@ def test_analyze_requires_key():
 def test_clear_keys_never_select_all():
     from app.core.form_filler import clear_keys, target_kind_for_class
 
-    assert target_kind_for_class("XLMAIN") == "excel"
+    assert target_kind_for_class("XLMAIN") == "grid"
     assert target_kind_for_class("SALFRAME") == "grid"
     assert target_kind_for_class("Chrome_WidgetWin_1") == "browser"
     assert target_kind_for_class("OpusApp") == "other"  # Word
-    for kind in ("excel", "grid", "browser", "other"):
+    for kind in ("grid", "browser", "other"):
         assert ("ctrl", "a") not in clear_keys(kind)
     assert clear_keys("grid") == [("delete",)]
-    assert clear_keys("excel") == [("delete",)]
     assert clear_keys("other") == []
 
 
@@ -187,11 +185,11 @@ def test_normalize_cell_handles_cyrillic_lookalikes():
     assert split_cell("AA12") == (27, 12)
 
 
-def test_analyze_snaps_cell_fields_to_grid():
-    from app.core.ai_engine import parse_fields, snap_to_grid
+def test_place_fields_snaps_cells_to_grid():
+    from app.core.ai_engine import parse_fields, place_fields
+    from app.core.grid import detect_grid
 
     png = excel_like_png()
-    b64 = base64.standard_b64encode(png).decode()
     region = CaptureRegion(x=100, y=50, width=900, height=ROW_TOP + ROW_H * N_ROWS + 30)
     data = {"top_left_cell": "A1", "fields": [
         # model's pixel guess is far off, but the address is right
@@ -201,11 +199,84 @@ def test_analyze_snaps_cell_fields_to_grid():
         {"label": "plain", "value": "y", "x": 10, "y": 10, "width": 5, "height": 5},
     ]}
     fields = parse_fields(data, region, 1.0, region.width, region.height)
-    snap_to_grid(fields, data, region, b64)
+    place_fields(fields, data, region, detect_grid(png), [])
     by_label = {f.label: f for f in fields}
     b3 = by_label["Дата"]
     assert b3.cell == "B3"
     assert (b3.x, b3.y) == (100 + COL_EDGES[1] + 1, 50 + ROW_TOP + 2 * ROW_H + 1)
     c4 = by_label["no coords"]
     assert (c4.x, c4.y) == (100 + COL_EDGES[2] + 1, 50 + ROW_TOP + 3 * ROW_H + 1)
+    # no address and the guess is outside the grid: left where the model said
     assert (by_label["plain"].x, by_label["plain"].y) == (110, 60)
+
+
+
+# ---------------------------------------------------------------- input boxes
+
+FORM_BOXES = [(200, 40, 160, 22), (200, 80, 160, 22), (200, 120, 60, 22), (290, 120, 60, 22),
+              (200, 160, 300, 80)]
+
+
+def web_form_png() -> bytes:
+    """A browser-like form: labels, bordered inputs, a gray button, a checkbox."""
+    from PIL import ImageDraw
+
+    img = Image.new("RGB", (640, 320), "white")
+    d = ImageDraw.Draw(img)
+    for i, (x, y, w, h) in enumerate(FORM_BOXES):
+        d.text((20, y + 4), f"Label {i}", fill="black")
+        d.rectangle([x - 1, y - 1, x + w, y + h], outline=(118, 118, 118))
+    d.rectangle([20, 270, 120, 300], fill=(225, 225, 225), outline=(118, 118, 118))  # button
+    d.rectangle([380, 42, 392, 54], outline=(118, 118, 118))  # checkbox: too small
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_detect_boxes_finds_inputs_only():
+    from app.core.boxes import detect_boxes
+
+    assert detect_boxes(web_form_png()) == FORM_BOXES
+
+
+def test_marks_are_drawn_on_the_image_sent_to_the_model():
+    from app.core.ai_engine import _prepare_screenshot
+
+    png = web_form_png()
+    plain, *_ = _prepare_screenshot(png, 640, 320, [])
+    marked, w, h, scale = _prepare_screenshot(png, 640, 320, FORM_BOXES)
+    assert (w, h, scale) == (640, 320, 1.0)
+    img = Image.open(io.BytesIO(base64.standard_b64decode(marked))).convert("RGB")
+    x, y, _, _ = FORM_BOXES[0]
+    assert img.getpixel((x + 2, y + 2)) == (220, 30, 30)  # red tag in the corner
+    assert plain != marked
+
+
+def test_place_fields_uses_box_number_and_snaps_guesses_into_boxes():
+    from app.core.ai_engine import parse_fields, place_fields
+
+    region = CaptureRegion(x=1000, y=500, width=640, height=320)
+    data = {"fields": [
+        {"label": "picked", "value": "a", "box": 2, "x": 5, "y": 5, "width": 5, "height": 5},
+        {"label": "guess", "value": "b", "x": 300, "y": 125, "width": 20, "height": 10},
+        {"label": "bad box", "value": "c", "box": 99, "x": 600, "y": 300, "width": 4, "height": 4},
+    ]}
+    fields = parse_fields(data, region, 1.0, 640, 320, len(FORM_BOXES))
+    place_fields(fields, data, region, None, FORM_BOXES)
+    by = {f.label: f for f in fields}
+    assert (by["picked"].x, by["picked"].y, by["picked"].width) == (1200, 580, 160)
+    assert by["guess"].box == 4 and (by["guess"].x, by["guess"].y) == (1290, 620)
+    assert by["bad box"].box == 0 and (by["bad box"].x, by["bad box"].y) == (1600, 800)
+
+
+def test_unanchored_fields_are_flagged():
+    from app.core.ai_engine import parse_fields, place_fields
+
+    region = CaptureRegion(x=0, y=0, width=640, height=320)
+    data = {"fields": [
+        {"label": "in box", "value": "a", "box": 1, "x": 1, "y": 1},
+        {"label": "nowhere", "value": "b", "x": 600, "y": 300, "width": 4, "height": 4},
+    ]}
+    fields = parse_fields(data, region, 1.0, 640, 320, len(FORM_BOXES))
+    place_fields(fields, data, region, None, FORM_BOXES)
+    assert [f.anchored for f in fields] == [True, False]

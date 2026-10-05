@@ -150,6 +150,22 @@ def cell_rect(grid: Grid, cell: str, top_left: str = "A1") -> tuple[int, int, in
     return x0 + 1, y0 + 1, max(1, x1 - x0 - 1), max(1, y1 - y0 - 1)
 
 
+def cell_at(grid: Grid, x: float, y: float) -> tuple[int, int, int, int] | None:
+    """Exact rectangle of the grid cell under a point, if any."""
+    cols, rows = grid.col_edges, grid.row_edges
+    for i in range(len(cols) - 1):
+        if cols[i] <= x < cols[i + 1]:
+            break
+    else:
+        return None
+    for j in range(len(rows) - 1):
+        if rows[j] <= y < rows[j + 1]:
+            break
+    else:
+        return None
+    return cols[i] + 1, rows[j] + 1, max(1, cols[i + 1] - cols[i] - 1), max(1, rows[j + 1] - rows[j] - 1)
+
+
 def _peaks(counts: list[float], ratio: float) -> list[int]:
     if not counts:
         return []

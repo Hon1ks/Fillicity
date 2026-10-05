@@ -40,6 +40,13 @@ FILE_FILTER = (
 )
 
 
+def _where(field) -> str:
+    """Cell address or the number of the marked input box the field maps to."""
+    if field.cell:
+        return field.cell
+    return f"поле №{field.box}" if field.box else ""
+
+
 def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
     frame = QFrame()
     frame.setObjectName("Card")
@@ -204,7 +211,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.fields_summary)
 
         self.fields_table = QTableWidget(0, 4)
-        self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение", "Ячейка", "x, y"])
+        self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение", "Где", "x, y"])
         header = self.fields_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.resizeSection(0, 190)
@@ -390,10 +397,15 @@ class MainWindow(QMainWindow):
         self.plan = plan
         self._log(f"Найдено полей: {len(plan.fields)}. {plan.notes}")
         for field in plan.fields:
-            where = f"{field.cell} " if field.cell else ""
+            where = f"{_where(field)} " if _where(field) else ""
             self._log(f'  • {field.label or "(без подписи)"} → "{field.value}" @ {where}({field.x}, {field.y})')
+        unsure = [f for f in plan.fields if plan.measured and not f.anchored and f.value]
+        warn = (
+            f" Не привязано к полю на экране: {len(unsure)} — выключены, проверьте вручную."
+            if unsure else ""
+        )
         self.fields_summary.setText(
-            f"Найдено полей: {len(plan.fields)}. {plan.notes}" if plan.fields
+            f"Найдено полей: {len(plan.fields)}. {plan.notes}{warn}" if plan.fields
             else f"Полей не найдено. {plan.notes}"
         )
         self._populate_fields_table(plan)
@@ -427,18 +439,25 @@ class MainWindow(QMainWindow):
                 | Qt.ItemFlag.ItemIsSelectable
                 | Qt.ItemFlag.ItemIsUserCheckable
             )
+            # A field Fillicity couldn't tie to a measured box/cell, while it did
+            # find boxes elsewhere, is probably mislocated: a miss-click would
+            # paste into whatever field has focus. Off unless the user opts in.
+            field.enabled = bool(field.value) and (field.anchored or not plan.measured)
             label_item.setCheckState(
-                Qt.CheckState.Checked if field.value else Qt.CheckState.Unchecked
+                Qt.CheckState.Checked if field.enabled else Qt.CheckState.Unchecked
             )
-            field.enabled = bool(field.value)
             value_item = QTableWidgetItem(field.value)
             read_only = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-            cell_item = QTableWidgetItem(field.cell or "—")
+            cell_item = QTableWidgetItem(_where(field) or "—")
             cell_item.setFlags(read_only)
             coord_item = QTableWidgetItem(f"{field.x}, {field.y}")
             coord_item.setFlags(read_only)
             self.fields_table.setItem(row, 0, label_item)
             self.fields_table.setItem(row, 1, value_item)
+            cell_item.setToolTip(
+                "Ячейка таблицы или номер поля ввода, найденного на снимке. "
+                "«—» — модель указала только примерное место."
+            )
             self.fields_table.setItem(row, 2, cell_item)
             self.fields_table.setItem(row, 3, coord_item)
         self._populating_table = False
@@ -504,7 +523,7 @@ class MainWindow(QMainWindow):
         self._fill_worker.start()
 
     def _on_fill_progress(self, index: int, total: int, field) -> None:
-        where = f"{field.cell} " if field.cell else ""
+        where = f"{_where(field)} " if _where(field) else ""
         self._log(
             f'Заполнено {index}/{total}: {field.label} = "{field.value}" '
             f"@ {where}({field.x}, {field.y})"
